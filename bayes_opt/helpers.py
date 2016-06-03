@@ -81,6 +81,12 @@ def unique_rows(a):
 
     return ui[reorder]
 
+# TODO: consider adding helper function to construct R matrix to avoid calling
+#       gp.fit() too often. This will be useful for the hyperparameter slice
+#       sampling process. Could be more memory efficient than having a bunch of
+#       GP objects, but then again having separate objects may be easier.
+#       Although, for burnin purposes, we would want to definitely only have a
+#       single GP.
 
 class BColours(object):
     BLUE = '\033[94m'

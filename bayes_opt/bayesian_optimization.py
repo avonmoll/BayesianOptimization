@@ -335,7 +335,11 @@ class BayesianOptimization(object):
         # Find unique rows of X to avoid GP from breaking
         ur = unique_rows(self.X)
         self.gp.fit(self.X[ur], self.Y[ur])
-
+        
+        # TODO: slice sample GP hypers
+        # TODO: figure out if maximum likelihood estimate is appropriate for
+        #       starting the Markov chain
+        
         # Finding argmax of the acquisition function.
         x_max = acq_max(ac=self.util.utility,
                         gp=self.gp,
@@ -369,6 +373,9 @@ class BayesianOptimization(object):
 
             # Updating the GP.
             ur = unique_rows(self.X)
+            
+            # TODO: slice sample GP hypers
+            
             self.gp.fit(self.X[ur], self.Y[ur])
 
             # Update maximum value to search for next probe point.
