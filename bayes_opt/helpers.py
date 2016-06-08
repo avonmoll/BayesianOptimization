@@ -80,6 +80,85 @@ def unique_rows(a):
     ui[1:] = (diff != 0).any(axis=1)
 
     return ui[reorder]
+    
+def slice_sample(init_x, logprob, sigma=1.0, step_out=True, max_steps_out=1000,
+                 compwise=False):
+    """
+    Slice sampling for GP hyperparameters. Used when integrateOverHypers is
+    True. Based off of https://github.com/JasperSnoek/spearmint/blob/master/spearmint/spearmint/util.py#L34.
+    
+    :param init_x: array, initial value(s) or previous sample
+    
+    :param logprob: callable, function to evaluate the log probability of the
+    sample - used as proposal evaluation criteria
+    
+    :param sigma: float, width of proposal range
+    
+    :param step_out: Bool, whether to grow the proposal range
+    
+    :param max_steps_out: int, maximum iterations for expanding the proposal
+    range
+    
+    :param compwise: Bool, whether each dimension should be sampled individually
+    
+    :return: array of the same size as x, new sample
+    """
+    
+    def direction_slice(direction, init_x):
+        def dir_logprob(z):
+            return logprob(direction*z + init_x)
+    
+        upper = sigma*np.random.rand()
+        lower = upper - sigma
+        llh_s = np.log(np.random.rand()) + dir_logprob(0.0)
+    
+        l_steps_out = 0
+        u_steps_out = 0
+        if step_out:
+            while dir_logprob(lower) > llh_s and l_steps_out < max_steps_out:
+                l_steps_out += 1
+                lower       -= sigma
+            while dir_logprob(upper) > llh_s and u_steps_out < max_steps_out:
+                u_steps_out += 1
+                upper       += sigma
+            
+        steps_in = 0
+        while True:
+            steps_in += 1
+            new_z     = (upper - lower)*np.random.rand() + lower
+            new_llh   = dir_logprob(new_z)
+            if np.isnan(new_llh):
+                print(new_z, direction*new_z + init_x, new_llh, llh_s, init_x, logprob(init_x))
+                raise Exception("Slice sampler got a NaN")
+            if new_llh > llh_s:
+                break
+            elif new_z < 0:
+                lower = new_z
+            elif new_z > 0:
+                upper = new_z
+            else:
+                raise Exception("Slice sampler shrank to zero!")
+
+        return new_z*direction + init_x
+    
+    if not init_x.shape:
+        init_x = np.array([init_x])
+
+    dims = init_x.shape[0]
+    if compwise:
+        ordering = range(dims)
+        np.random.shuffle(ordering)
+        cur_x = init_x.copy()
+        for d in ordering:
+            direction    = np.zeros((dims))
+            direction[d] = 1.0
+            cur_x = direction_slice(direction, cur_x)
+        return cur_x
+            
+    else:
+        direction = np.random.randn(dims)
+        direction = direction / np.sqrt(np.sum(direction**2))
+        return direction_slice(direction, init_x)
 
 # TODO: consider adding helper function to construct R matrix to avoid calling
 #       gp.fit() too often. This will be useful for the hyperparameter slice
@@ -87,6 +166,11 @@ def unique_rows(a):
 #       GP objects, but then again having separate objects may be easier.
 #       Although, for burnin purposes, we would want to definitely only have a
 #       single GP.
+
+# TODO: Write a function to predict a single point from the GP a la Rasmussen
+#       using noise and amplitude -- OR -- could try to fiddle with using
+#       scikit-learn's GP by scaling the correlation function and adding a         
+#       so-called "nugget" for the noise
 
 class BColours(object):
     BLUE = '\033[94m'

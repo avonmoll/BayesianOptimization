@@ -3,7 +3,8 @@ from __future__ import division
 import numpy as np
 from sklearn.gaussian_process import GaussianProcess
 from scipy.optimize import minimize
-from .helpers import UtilityFunction, unique_rows, PrintLog
+from scipy.linalg import cholesky, cho_solve
+from .helpers import UtilityFunction, unique_rows, PrintLog, slice_sample
 
 __author__ = 'fmfn'
 
@@ -33,6 +34,13 @@ def acq_max(ac, gp, y_max, bounds):
     :return: x_max, The arg max of the acquisition function.
     """
 
+    def integrateAcqOverHypers(x):
+        acq_list = np.zeros((len(gp_list),))
+        for i in xrange(len(gp_list)):
+            acq_list[i] = ac(x.reshape(1,-1), gp=gp_list[i], y_max=y_max)
+        
+        return np.mean(acq_list)
+    
     # Start with the lower bound as the argmax
     x_max = bounds[:, 0]
     max_acq = None
@@ -41,11 +49,18 @@ def acq_max(ac, gp, y_max, bounds):
                                 size=(100, bounds.shape[0]))
 
     for x_try in x_tries:
-        # Find the minimum of minus the acquisition function
-        res = minimize(lambda x: -ac(x.reshape(1, -1), gp=gp, y_max=y_max),
-                       x_try.reshape(1, -1),
-                       bounds=bounds,
-                       method="L-BFGS-B")
+        if type(gp) == list: # integrateOverHypers is True
+            gp_list = gp
+            res = minimize(lambda x: -integrateAcqOverHypers(x),
+                           x_try.reshape(1, -1),
+                           bounds=bounds,
+                           method="L-BFGS-B")
+        else:
+            # Find the minimum of minus the acquisition function
+            res = minimize(lambda x: -ac(x.reshape(1, -1), gp=gp, y_max=y_max),
+                           x_try.reshape(1, -1),
+                           bounds=bounds,
+                           method="L-BFGS-B")
 
         # Store it if better than previous minimum(maximum).
         if max_acq is None or -res.fun >= max_acq:
@@ -146,6 +161,19 @@ class BayesianOptimization(object):
         # Numpy array place holders
         self.X = None
         self.Y = None
+        
+        # Hyperparameter place holders
+        self.mean = None
+        self.amp2 = None
+        self.noise = None
+        self.ls = None
+        self.hyper_samples = []
+        self.noiseless = None
+        
+        # Hyperparameter Scales
+        self.noise_scale = 0.1
+        self.amp2_scale = 1.0
+        self.max_ls = 2.0
 
         # Counter of iterations
         self.i = 0
@@ -159,6 +187,9 @@ class BayesianOptimization(object):
                                   thetaL=1e-5 * np.ones(self.dim),
                                   thetaU=1e0 * np.ones(self.dim),
                                   random_start=30)
+        
+        # Placeholder for list of GPs used when integrateOverHypers is True
+        self.gp_list = []
 
         # Utility Function placeholder
         self.util = None
@@ -282,6 +313,114 @@ class BayesianOptimization(object):
 
             # Reset all entries, even if the same.
             self.bounds[row] = self.pbounds[key]
+            
+    def _generate_hypers_samples(self):
+        """ Largely based off of https://github.com/JasperSnoek/spearmint/blob/master/spearmint/spearmint/chooser/GPEIOptChooser.py#L621
+        """
+        
+        def sample_hypers(burningIn = False):
+            if self.noiseless:
+                self.noise = 1e-3
+            sample_mean_noise_amp2()
+            sample_ls()
+            if not burningIn:
+                self.hyper_samples.append(
+                    (self.mean, self.noise, self.amp2, self.ls))
+            
+        def sample_mean_noise_amp2():
+            def logprob(hypers):
+                mean = hypers[0]
+                amp2 = hypers[1]
+                noise = hypers[2]
+                
+                if mean > np.max(self.Y) or mean < np.min(self.Y):
+                    return -np.inf
+                
+                if amp2 < 0 or noise < 0:
+                    return -np.inf
+                
+                # TODO: remove this once amp2 functionality is fixed
+                amp2 = 1
+                
+                R = np.dot(self.gp.C, self.gp.C.transpose())
+                
+                cov = (amp2 * (R + 1e-6*np.eye(R.shape[0])) + 
+                    noise*np.eye(R.shape[0]))
+                chol = cholesky(cov, lower=True)
+                solve = cho_solve((chol,True), self.Y - mean)
+                lp = -np.sum(np.log(np.diag(chol)))-0.5*np.dot(self.Y-mean,solve)
+                
+                if not self.noiseless:
+                    # Add noise horseshoe prior
+                    lp += np.log(np.log(1+(self.noise_scale/noise)**2))
+                    
+                # Add in amplitude lognormal prior
+                lp -= 0.5*(np.log(np.sqrt(amp2))/self.amp2_scale)**2
+                
+                return lp
+            
+            hypers = slice_sample(np.array(
+                [self.mean, self.amp2, self.noise]), logprob, compwise=False)
+            self.mean = hypers[0]
+            #self.amp2 = hypers[1]
+            # TODO: uncomment previous and delete following once amp2 is fixed
+            self.amp2 = 1
+            self.noise = hypers[2]
+            
+        def sample_ls():
+            def logprob(ls):
+                if np.any(ls < 0) or np.any(ls > self.max_ls):
+                    return -np.inf
+                
+                # Update GP
+                self.gp.set_params(**{'theta0': ls,
+                                    'thetaU': None,
+                                    'thetaL': None})
+                ur = unique_rows(self.X)
+                self.gp.fit(self.X[ur], self.Y[ur])
+                
+                R = np.dot(self.gp.C, self.gp.C.transpose())
+                
+                cov = (self.amp2 * (R + 1e-6*np.eye(R.shape[0])) + 
+                    self.noise*np.eye(R.shape[0]))
+                chol = cholesky(cov, lower=True)
+                solve = cho_solve((chol,True), self.Y - self.mean)
+                lp = (-np.sum(np.log(np.diag(chol))) - 
+                        0.5*np.dot(self.Y-self.mean, solve))
+                return lp
+            
+            self.ls = slice_sample(self.ls, logprob, compwise=True)
+            
+        # Initialize hyperparameters
+        self.mean = np.mean(self.Y)
+        self.noise = 1e-3
+        self.amp2 = np.std(self.Y) + 1e-4
+        self.ls = np.ones((self.dim,))
+        
+        # Perform burn-in
+        for i in xrange(100):
+            sample_hypers(burningIn=True)
+        
+        # Clear previous hyper samples
+        self.hyper_samples = []
+        
+        # Store hyper parameter samples
+        for i in xrange(10):
+            sample_hypers()
+            
+    def _construct_gp_list(self):
+        # Construct list of GPs based on hyper_samples
+        if not self.gp_list:
+            self.gp_list = [GaussianProcess() for hyper in 
+                            xrange(len(self.hyper_samples))]
+        for i,(mean,noise,amp2,ls) in enumerate(self.hyper_samples):
+            gp_params = self.gp.get_params()
+            gp_params['theta0'] = ls
+            gp_params['nugget'] = noise
+            # TODO: How to scale the amplitude?
+            self.gp_list[i].set_params(**gp_params)
+            ur = unique_rows(self.X)
+            self.gp_list[i].fit(self.X[ur], self.Y[ur])
 
     def maximize(self,
                  init_points=5,
@@ -289,6 +428,8 @@ class BayesianOptimization(object):
                  acq='ei',
                  kappa=2.576,
                  xi=0.0,
+                 integrateOverHypers=False,
+                 noiseless=True,
                  **gp_params):
         """
         Main optimization method.
@@ -307,10 +448,28 @@ class BayesianOptimization(object):
 
         :param acq:
             Acquisition function to be used, defaults to Expected Improvement.
+            
+        :param kappa:
+            Scalar float for controlling tradeoff between exporation and
+            exploitation when using the GP-UCB acquisition function
+            
+        :param xi:
+            Scalar float for controlling tradeoff between exploration and
+            exploitatoin when using EI or POI acquisition functions
 
         :param gp_params:
             Parameters to be passed to the Scikit-learn Gaussian Process object
 
+        :param integrateOverHypers:
+            Boolean to decide whether or not to sample from a posterior
+            hyperparameter distribution and integrate over the possibilities or
+            to estimate the hyperparameters (lengthscales) using maximum
+            likelihood (default)
+            
+        :param noiseless:
+            Boolean to specify whether the observations are noisy or not (only
+            used when integrateOverHypers is True)
+        
         Returns
         -------
         :return: Nothing
@@ -320,6 +479,8 @@ class BayesianOptimization(object):
 
         # Set acquisition function
         self.util = UtilityFunction(kind=acq, kappa=kappa, xi=xi)
+        
+        self.noiseless = noiseless
 
         # Initialize x, y and find current y_max
         if not self.initialized:
@@ -330,19 +491,23 @@ class BayesianOptimization(object):
         y_max = self.Y.max()
 
         # Set parameters if any was passed
+        if integrateOverHypers:
+            gp_params['theta0'] = np.ones((self.dim,))
+            gp_params['thetaU'] = None
+            gp_params['thetaL'] = None
         self.gp.set_params(**gp_params)
 
         # Find unique rows of X to avoid GP from breaking
         ur = unique_rows(self.X)
         self.gp.fit(self.X[ur], self.Y[ur])
         
-        # TODO: slice sample GP hypers
-        # TODO: figure out if maximum likelihood estimate is appropriate for
-        #       starting the Markov chain
+        if integrateOverHypers:
+            self._generate_hypers_samples()
+            self._construct_gp_list()
         
         # Finding argmax of the acquisition function.
         x_max = acq_max(ac=self.util.utility,
-                        gp=self.gp,
+                        gp=self.gp_list if integrateOverHypers else self.gp,
                         y_max=y_max,
                         bounds=self.bounds)
 
@@ -374,9 +539,18 @@ class BayesianOptimization(object):
             # Updating the GP.
             ur = unique_rows(self.X)
             
-            # TODO: slice sample GP hypers
-            
+            if integrateOverHypers:
+                gp_params = self.gp.get_params()
+                gp_params['theta0'] = np.ones((self.dim,))
+                gp_params['thetaU'] = None
+                gp_params['thetaL'] = None
+                self.gp.set_params(**gp_params)
+                
             self.gp.fit(self.X[ur], self.Y[ur])
+            
+            if integrateOverHypers:
+                self._generate_hypers_samples()
+                self._construct_gp_list()
 
             # Update maximum value to search for next probe point.
             if self.Y[-1] > y_max:
@@ -384,7 +558,7 @@ class BayesianOptimization(object):
 
             # Maximize acquisition function to find next probing point
             x_max = acq_max(ac=self.util.utility,
-                            gp=self.gp,
+                            gp=self.gp_list if integrateOverHypers else self.gp,
                             y_max=y_max,
                             bounds=self.bounds)
 
