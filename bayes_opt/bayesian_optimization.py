@@ -340,15 +340,16 @@ class BayesianOptimization(object):
                     return -np.inf
                 
                 # TODO: remove this once amp2 functionality is fixed
-                amp2 = 1
+                #amp2 = 1
                 
                 R = np.dot(self.gp.C, self.gp.C.transpose())
                 
-                cov = (amp2 * (R + 1e-6*np.eye(R.shape[0])) + 
+                cov = ((R + 1e-6*np.eye(R.shape[0])) + 
                     noise*np.eye(R.shape[0]))
                 chol = cholesky(cov, lower=True)
-                solve = cho_solve((chol,True), self.Y - mean)
-                lp = -np.sum(np.log(np.diag(chol)))-0.5*np.dot(self.Y-mean,solve)
+                solve = cho_solve((chol,True), (self.Y - mean)/np.sqrt(amp2))
+                lp = -np.sum(np.log(np.diag(chol))) \
+                     -0.5*np.dot((self.Y-mean)/np.sqrt(amp2),solve)
                 
                 if not self.noiseless:
                     # Add noise horseshoe prior
@@ -362,9 +363,9 @@ class BayesianOptimization(object):
             hypers = slice_sample(np.array(
                 [self.mean, self.amp2, self.noise]), logprob, compwise=False)
             self.mean = hypers[0]
-            #self.amp2 = hypers[1]
+            self.amp2 = hypers[1]
             # TODO: uncomment previous and delete following once amp2 is fixed
-            self.amp2 = 1
+            #self.amp2 = 1
             self.noise = hypers[2]
             
         def sample_ls():
@@ -381,12 +382,13 @@ class BayesianOptimization(object):
                 
                 R = np.dot(self.gp.C, self.gp.C.transpose())
                 
-                cov = (self.amp2 * (R + 1e-6*np.eye(R.shape[0])) + 
+                cov = ((R + 1e-6*np.eye(R.shape[0])) + 
                     self.noise*np.eye(R.shape[0]))
                 chol = cholesky(cov, lower=True)
-                solve = cho_solve((chol,True), self.Y - self.mean)
+                solve = cho_solve((chol,True), 
+                                  (self.Y - self.mean)/np.sqrt(self.amp2))
                 lp = (-np.sum(np.log(np.diag(chol))) - 
-                        0.5*np.dot(self.Y-self.mean, solve))
+                        0.5*np.dot((self.Y-self.mean)/np.sqrt(self.amp2), solve))
                 return lp
             
             self.ls = slice_sample(self.ls, logprob, compwise=True)
@@ -416,8 +418,12 @@ class BayesianOptimization(object):
         for i,(mean,noise,amp2,ls) in enumerate(self.hyper_samples):
             gp_params = self.gp.get_params()
             gp_params['theta0'] = ls
-            gp_params['nugget'] = noise
+            gp_params['nugget'] = noise #/ amp2 # or should it be mean in the denom? ... pretty sure it's just noise
             # TODO: How to scale the amplitude?
+            # TODO: Perhaps these GPs should set normalize to False so we can do
+            #       our own normalization using mean and amp2. This would mean
+            #       we'd have to normalize all of the inputs, outputs, and Test
+            #       points ourselves.
             self.gp_list[i].set_params(**gp_params)
             ur = unique_rows(self.X)
             self.gp_list[i].fit(self.X[ur], self.Y[ur])
