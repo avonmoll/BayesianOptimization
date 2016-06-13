@@ -37,7 +37,7 @@ def acq_max(ac, gp, y_max, bounds):
     def integrateAcqOverHypers(x):
         acq_list = np.zeros((len(gp_list),))
         for i in xrange(len(gp_list)):
-            acq_list[i] = ac(x.reshape(1,-1), gp=gp_list[i], y_max=y_max)
+            acq_list[i] = ac(x.reshape(1, -1), gp=gp_list[i], y_max=y_max)
         
         return np.mean(acq_list)
     
@@ -49,7 +49,7 @@ def acq_max(ac, gp, y_max, bounds):
                                 size=(100, bounds.shape[0]))
 
     for x_try in x_tries:
-        if type(gp) == list: # integrateOverHypers is True
+        if type(gp) == list:  # integrateOverHypers is True
             gp_list = gp
             res = minimize(lambda x: -integrateAcqOverHypers(x),
                            x_try.reshape(1, -1),
@@ -71,6 +71,7 @@ def acq_max(ac, gp, y_max, bounds):
     # point technicalities this is not always the case.
     return np.clip(x_max, bounds[:, 0], bounds[:, 1])
 
+
 def matern52(theta, d):
     """
     Matern 5/2 correlation model.::
@@ -84,7 +85,7 @@ def matern52(theta, d):
     Parameters
     ----------
     theta : array_like
-        An array with shape 1 (isotropic) or n (anisotropic) giving the 
+        An array with shape 1 (isotropic) or n (anisotropic) giving the
         autocorrelation parameter(s).
         
     d : array_like
@@ -96,7 +97,7 @@ def matern52(theta, d):
     -------
     r : array_like
         An array with shape (n_eval, ) containing the values of the
-        autocorrelation modle.
+        autocorrelation model.
     """
 
     theta = np.asarray(theta, dtype=np.float)
@@ -106,16 +107,16 @@ def matern52(theta, d):
         n_features = d.shape[1]
     else:
         n_features = 1
-        
+    
     if theta.size == 1:
         r = np.sqrt(np.sum(d ** 2, axis=1)) / theta[0]
     elif theta.size != n_features:
         raise ValueError("Length of theta must be 1 or %s" % n_features)
     else:
-        r = np.sqrt(np.sum(d ** 2 / theta.reshape(1,n_features) ** 2 , axis=1))
-        
-    return (1 + np.sqrt(5)*r + 5/3.*r ** 2) * np.exp(-np.sqrt(5)*r)
-        
+        r = np.sqrt(np.sum(d ** 2 / theta.reshape(1, n_features) ** 2, axis=1))
+
+    return (1 + np.sqrt(5) * r + 5 / 3. * r ** 2) * np.exp(-np.sqrt(5) * r)
+    
 
 class BayesianOptimization(object):
 
@@ -183,7 +184,8 @@ class BayesianOptimization(object):
         # is scikit-learn. So I'll pick the easy route here and simple specify
         # only theta0.
         self.gp = GaussianProcess(corr=matern52,
-                                  theta0=np.random.uniform(0.001, 0.05, self.dim),
+                                  theta0=np.random.uniform(0.001, 0.05,
+                                                           self.dim),
                                   thetaL=1e-5 * np.ones(self.dim),
                                   thetaU=1e0 * np.ones(self.dim),
                                   random_start=30)
@@ -318,10 +320,10 @@ class BayesianOptimization(object):
         """ Largely based off of https://github.com/JasperSnoek/spearmint/blob/master/spearmint/spearmint/chooser/GPEIOptChooser.py#L621
         """
         
-        def sample_hypers(burningIn = False):
+        def sample_hypers(burningIn=False):
+            sample_mean_noise_amp2()
             if self.noiseless:
                 self.noise = 1e-3
-            sample_mean_noise_amp2()
             sample_ls()
             if not burningIn:
                 self.hyper_samples.append(
@@ -339,24 +341,22 @@ class BayesianOptimization(object):
                 if amp2 < 0 or noise < 0:
                     return -np.inf
                 
-                # TODO: remove this once amp2 functionality is fixed
-                #amp2 = 1
-                
                 R = np.dot(self.gp.C, self.gp.C.transpose())
                 
-                cov = ((R + 1e-6*np.eye(R.shape[0])) + 
-                    noise*np.eye(R.shape[0]))
+                cov = (amp2 * (R + 1e-6 * np.eye(R.shape[0])) +
+                       noise * np.eye(R.shape[0]))
                 chol = cholesky(cov, lower=True)
-                solve = cho_solve((chol,True), (self.Y - mean)/np.sqrt(amp2))
+                solve = cho_solve((chol, True),
+                                  (self.Y - mean))
                 lp = -np.sum(np.log(np.diag(chol))) \
-                     -0.5*np.dot((self.Y-mean)/np.sqrt(amp2),solve)
+                     - 0.5 * np.dot((self.Y - mean), solve)
                 
                 if not self.noiseless:
                     # Add noise horseshoe prior
-                    lp += np.log(np.log(1+(self.noise_scale/noise)**2))
+                    lp += np.log(np.log(1 + (self.noise_scale / noise)**2))
                     
                 # Add in amplitude lognormal prior
-                lp -= 0.5*(np.log(np.sqrt(amp2))/self.amp2_scale)**2
+                lp -= 0.5 * (np.log(np.sqrt(amp2)) / self.amp2_scale)**2
                 
                 return lp
             
@@ -364,8 +364,6 @@ class BayesianOptimization(object):
                 [self.mean, self.amp2, self.noise]), logprob, compwise=False)
             self.mean = hypers[0]
             self.amp2 = hypers[1]
-            # TODO: uncomment previous and delete following once amp2 is fixed
-            #self.amp2 = 1
             self.noise = hypers[2]
             
         def sample_ls():
@@ -375,20 +373,21 @@ class BayesianOptimization(object):
                 
                 # Update GP
                 self.gp.set_params(**{'theta0': ls,
-                                    'thetaU': None,
-                                    'thetaL': None})
+                                      'thetaU': None,
+                                      'thetaL': None})
                 ur = unique_rows(self.X)
                 self.gp.fit(self.X[ur], self.Y[ur])
                 
                 R = np.dot(self.gp.C, self.gp.C.transpose())
                 
-                cov = ((R + 1e-6*np.eye(R.shape[0])) + 
-                    self.noise*np.eye(R.shape[0]))
+                cov = (self.amp2 * (R + 1e-6 * np.eye(R.shape[0])) +
+                       self.noise * np.eye(R.shape[0]))
                 chol = cholesky(cov, lower=True)
-                solve = cho_solve((chol,True), 
-                                  (self.Y - self.mean)/np.sqrt(self.amp2))
-                lp = (-np.sum(np.log(np.diag(chol))) - 
-                        0.5*np.dot((self.Y-self.mean)/np.sqrt(self.amp2), solve))
+                solve = cho_solve((chol, True),
+                                  (self.Y - self.mean))
+                lp = -np.sum(np.log(np.diag(chol))) \
+                     - 0.5 * np.dot((self.Y - self.mean),
+                     solve)
                 return lp
             
             self.ls = slice_sample(self.ls, logprob, compwise=True)
@@ -413,20 +412,22 @@ class BayesianOptimization(object):
     def _construct_gp_list(self):
         # Construct list of GPs based on hyper_samples
         if not self.gp_list:
-            self.gp_list = [GaussianProcess() for hyper in 
+            self.gp_list = [GaussianProcess() for hyper in
                             xrange(len(self.hyper_samples))]
-        for i,(mean,noise,amp2,ls) in enumerate(self.hyper_samples):
+        ur = unique_rows(self.X)
+        for i, (mean, noise, amp2, ls) in enumerate(self.hyper_samples):
             gp_params = self.gp.get_params()
             gp_params['theta0'] = ls
-            gp_params['nugget'] = noise #/ amp2 # or should it be mean in the denom? ... pretty sure it's just noise
-            # TODO: How to scale the amplitude?
-            # TODO: Perhaps these GPs should set normalize to False so we can do
-            #       our own normalization using mean and amp2. This would mean
-            #       we'd have to normalize all of the inputs, outputs, and Test
-            #       points ourselves.
+            if not self.noiseless:
+                gp_params['nugget'] = noise
+            # TODO: Perhaps we need to create our own version of GP prediction
+            #       so that we can utilize the mean and amp2 samples properly.
+            #       I tried simply injecting them into the scikit-learn GPs,
+            #       but it did not lead to good results.
             self.gp_list[i].set_params(**gp_params)
-            ur = unique_rows(self.X)
             self.gp_list[i].fit(self.X[ur], self.Y[ur])
+            self.gp_list[i].y_mean = mean
+            # self.gp_list[i].y_std = np.sqrt(amp2)
 
     def maximize(self,
                  init_points=5,

@@ -81,6 +81,7 @@ def unique_rows(a):
 
     return ui[reorder]
     
+
 def slice_sample(init_x, logprob, sigma=1.0, step_out=True, max_steps_out=1000,
                  compwise=False):
     """
