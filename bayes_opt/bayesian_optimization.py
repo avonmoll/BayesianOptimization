@@ -426,7 +426,7 @@ class BayesianOptimization(object):
             #       but it did not lead to good results.
             self.gp_list[i].set_params(**gp_params)
             self.gp_list[i].fit(self.X[ur], self.Y[ur])
-            self.gp_list[i].y_mean = mean
+            # self.gp_list[i].y_mean = mean
             # self.gp_list[i].y_std = np.sqrt(amp2)
 
     def maximize(self,
