@@ -386,8 +386,7 @@ class BayesianOptimization(object):
                 solve = cho_solve((chol, True),
                                   (self.Y - self.mean))
                 lp = -np.sum(np.log(np.diag(chol))) \
-                     - 0.5 * np.dot((self.Y - self.mean),
-                     solve)
+                     - 0.5 * np.dot((self.Y - self.mean), solve)
                 return lp
             
             self.ls = slice_sample(self.ls, logprob, compwise=True)

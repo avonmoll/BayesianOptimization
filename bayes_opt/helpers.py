@@ -2,7 +2,8 @@ from __future__ import print_function
 from __future__ import division
 import numpy as np
 from datetime import datetime
-from scipy.stats import norm
+from scipy.stats import norm, multivariate_normal as mvn
+from scipy.linalg import cholesky, inv
 
 
 class UtilityFunction(object):
@@ -46,7 +47,7 @@ class UtilityFunction(object):
         # Avoid points with zero variance
         var = np.maximum(var, 1e-9 + 0 * var)
 
-        z = (mean - y_max - xi)/np.sqrt(var)
+        z = (mean - y_max - xi) / np.sqrt(var)
         return (mean - y_max - xi) * norm.cdf(z) + np.sqrt(var) * norm.pdf(z)
 
     @staticmethod
@@ -56,7 +57,7 @@ class UtilityFunction(object):
         # Avoid points with zero variance
         var = np.maximum(var, 1e-9 + 0 * var)
 
-        z = (mean - y_max - xi)/np.sqrt(var)
+        z = (mean - y_max - xi) / np.sqrt(var)
         return norm.cdf(z)
 
 
@@ -107,9 +108,9 @@ def slice_sample(init_x, logprob, sigma=1.0, step_out=True, max_steps_out=1000,
     
     def direction_slice(direction, init_x):
         def dir_logprob(z):
-            return logprob(direction*z + init_x)
+            return logprob(direction * z + init_x)
     
-        upper = sigma*np.random.rand()
+        upper = sigma * np.random.rand()
         lower = upper - sigma
         llh_s = np.log(np.random.rand()) + dir_logprob(0.0)
     
@@ -118,18 +119,19 @@ def slice_sample(init_x, logprob, sigma=1.0, step_out=True, max_steps_out=1000,
         if step_out:
             while dir_logprob(lower) > llh_s and l_steps_out < max_steps_out:
                 l_steps_out += 1
-                lower       -= sigma
+                lower -= sigma
             while dir_logprob(upper) > llh_s and u_steps_out < max_steps_out:
                 u_steps_out += 1
-                upper       += sigma
+                upper += sigma
             
         steps_in = 0
         while True:
             steps_in += 1
-            new_z     = (upper - lower)*np.random.rand() + lower
-            new_llh   = dir_logprob(new_z)
+            new_z = (upper - lower) * np.random.rand() + lower
+            new_llh = dir_logprob(new_z)
             if np.isnan(new_llh):
-                print(new_z, direction*new_z + init_x, new_llh, llh_s, init_x, logprob(init_x))
+                print(new_z, direction * new_z + init_x, new_llh, llh_s,
+                      init_x, logprob(init_x))
                 raise Exception("Slice sampler got a NaN")
             if new_llh > llh_s:
                 break
@@ -140,7 +142,7 @@ def slice_sample(init_x, logprob, sigma=1.0, step_out=True, max_steps_out=1000,
             else:
                 raise Exception("Slice sampler shrank to zero!")
 
-        return new_z*direction + init_x
+        return new_z * direction + init_x
     
     if not init_x.shape:
         init_x = np.array([init_x])
@@ -151,7 +153,7 @@ def slice_sample(init_x, logprob, sigma=1.0, step_out=True, max_steps_out=1000,
         np.random.shuffle(ordering)
         cur_x = init_x.copy()
         for d in ordering:
-            direction    = np.zeros((dims))
+            direction = np.zeros((dims))
             direction[d] = 1.0
             cur_x = direction_slice(direction, cur_x)
         return cur_x
@@ -160,6 +162,69 @@ def slice_sample(init_x, logprob, sigma=1.0, step_out=True, max_steps_out=1000,
         direction = np.random.randn(dims)
         direction = direction / np.sqrt(np.sum(direction**2))
         return direction_slice(direction, init_x)
+        
+
+def alg4(cov_fn, prior, init_theta, init_f, y, scale=10):
+    theta = init_theta
+    f = init_f
+    
+    # Iterate through each parameter
+    for i, theta_i in enumerate(theta):
+        mean, noise, amp2 = theta[:3]
+        cov = cov_fn(theta)
+        S_theta = np.diag(((noise + np.diag(cov)) / noise * np.diag(cov) -
+                           np.diag(cov) ** -1) ** -1)
+        
+        # Draw surrogate data
+        g = mvn.rvs(f, S_theta)
+        
+        # Compute implied latent variables
+        R_theta = S_theta - np.dot(S_theta, np.dot(inv(S_theta + cov),
+                                                   S_theta))
+        m_theta = np.dot(R_theta, np.dot(inv(S_theta), g))
+        R_chol = cholesky(R_theta, lower=True)
+        eta = np.dot(inv(R_chol), f - m_theta)
+        
+        # Randomly center bracket
+        theta_min = np.max([1e-3, theta_i - scale * np.random.rand()])
+        theta_max = theta_min + scale
+        
+        # Determine threshold
+        like = np.product([norm.pdf(y_n, f_n, np.sqrt(noise))
+                           for y_n, f_n in zip(y, f)])
+        thresh = (np.random.rand() * like *
+                  mvn.pdf(g, np.zeros(np.shape(g)), cov + S_theta) *
+                  prior(theta))
+                  
+        for j in xrange(100):
+            # Draw proposal
+            theta_p = np.copy(theta)
+            theta_p[i] = theta_min + np.random.rand() * (theta_max - theta_min)
+            noise = theta_p[1]
+            
+            # Compute function
+            cov_p = cov_fn(theta_p)
+            S_theta_p = np.diag(((noise + np.diag(cov_p)) / noise * np.diag(cov_p) -
+                                np.diag(cov_p) ** -1) ** -1)
+            R_theta_p = S_theta_p - np.dot(S_theta_p, np.dot(inv(S_theta_p + cov_p),
+                                                             S_theta_p))
+            m_theta_p = np.dot(R_theta_p, np.dot(inv(S_theta_p), g))
+            R_chol_p = cholesky(R_theta_p, lower=True)
+            f_p = np.dot(R_chol_p, eta) + m_theta_p
+            like_p = np.product([norm.pdf(y_n, f_n_p, np.sqrt(noise))
+                                 for y_n, f_n_p in zip(y, f_p)])
+            prob = (like_p *
+                    mvn.pdf(g, np.zeros(np.shape(g)), cov_p + S_theta_p) *
+                    prior(theta_p))
+            if prob > thresh:
+                f = np.copy(f_p)
+                theta[i] = theta_p[i]
+                break
+            elif theta_p[i] < theta_i:
+                theta_min = theta_p[i]
+            else:
+                theta_max = theta_p[i]
+    return theta, f
 
 # TODO: consider adding helper function to construct R matrix to avoid calling
 #       gp.fit() too often. This will be useful for the hyperparameter slice
@@ -170,8 +235,9 @@ def slice_sample(init_x, logprob, sigma=1.0, step_out=True, max_steps_out=1000,
 
 # TODO: Write a function to predict a single point from the GP a la Rasmussen
 #       using noise and amplitude -- OR -- could try to fiddle with using
-#       scikit-learn's GP by scaling the correlation function and adding a         
+#       scikit-learn's GP by scaling the correlation function and adding a
 #       so-called "nugget" for the noise
+
 
 class BColours(object):
     BLUE = '\033[94m'
