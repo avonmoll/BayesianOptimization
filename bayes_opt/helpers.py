@@ -163,68 +163,79 @@ def slice_sample(init_x, logprob, sigma=1.0, step_out=True, max_steps_out=1000,
         direction = direction / np.sqrt(np.sum(direction**2))
         return direction_slice(direction, init_x)
         
-
-def alg4(cov_fn, prior, init_theta, init_f, y, scale=10):
-    theta = init_theta
-    f = init_f
+def elliptical_slice(initial_theta,prior,lnpdf,
+                     cur_lnpdf=None,angle_range=None):
+    """
+    NAME:
+       elliptical_slice
+    PURPOSE:
+       Markov chain update for a distribution with a Gaussian "prior" factored out
+    INPUT:
+       initial_theta - initial vector
+       prior - cholesky decomposition of the covariance matrix 
+               (like what numpy.linalg.cholesky returns), 
+               or a sample from the prior
+       lnpdf - function evaluating the log of the pdf to be sampled
+       pdf_params= parameters to pass to the pdf
+       cur_lnpdf= value of lnpdf at initial_theta (optional)
+       angle_range= Default 0: explore whole ellipse with break point at
+                    first rejection. Set in (0,2*pi] to explore a bracket of
+                    the specified width centred uniformly at random.
+    OUTPUT:
+       new_theta, new_lnpdf
+    HISTORY:
+       Originally written in matlab by Iain Murray (http://homepages.inf.ed.ac.uk/imurray2/pub/10ess/elliptical_slice.m)
+       2012-02-24 - Written - Bovy (IAS)
+       2016-06-29 - Adapted for multidimensional theta - Von Moll
+    """
+    D= len(initial_theta)
+    theta = initial_theta
     
-    # Iterate through each parameter
-    for i, theta_i in enumerate(theta):
-        mean, noise, amp2 = theta[:3]
-        cov = cov_fn(theta)
-        S_theta = np.diag(((noise + np.diag(cov)) / noise * np.diag(cov) -
-                           np.diag(cov) ** -1) ** -1)
-        
-        # Draw surrogate data
-        g = mvn.rvs(f, S_theta)
-        
-        # Compute implied latent variables
-        R_theta = S_theta - np.dot(S_theta, np.dot(inv(S_theta + cov),
-                                                   S_theta))
-        m_theta = np.dot(R_theta, np.dot(inv(S_theta), g))
-        R_chol = cholesky(R_theta, lower=True)
-        eta = np.dot(inv(R_chol), f - m_theta)
-        
-        # Randomly center bracket
-        theta_min = np.max([1e-3, theta_i - scale * np.random.rand()])
-        theta_max = theta_min + scale
-        
-        # Determine threshold
-        like = np.product([norm.pdf(y_n, f_n, np.sqrt(noise))
-                           for y_n, f_n in zip(y, f)])
-        thresh = (np.random.rand() * like *
-                  mvn.pdf(g, np.zeros(np.shape(g)), cov + S_theta) *
-                  prior(theta))
-                  
-        for j in xrange(100):
-            # Draw proposal
-            theta_p = np.copy(theta)
-            theta_p[i] = theta_min + np.random.rand() * (theta_max - theta_min)
-            noise = theta_p[1]
-            
-            # Compute function
-            cov_p = cov_fn(theta_p)
-            S_theta_p = np.diag(((noise + np.diag(cov_p)) / noise * np.diag(cov_p) -
-                                np.diag(cov_p) ** -1) ** -1)
-            R_theta_p = S_theta_p - np.dot(S_theta_p, np.dot(inv(S_theta_p + cov_p),
-                                                             S_theta_p))
-            m_theta_p = np.dot(R_theta_p, np.dot(inv(S_theta_p), g))
-            R_chol_p = cholesky(R_theta_p, lower=True)
-            f_p = np.dot(R_chol_p, eta) + m_theta_p
-            like_p = np.product([norm.pdf(y_n, f_n_p, np.sqrt(noise))
-                                 for y_n, f_n_p in zip(y, f_p)])
-            prob = (like_p *
-                    mvn.pdf(g, np.zeros(np.shape(g)), cov_p + S_theta_p) *
-                    prior(theta_p))
-            if prob > thresh:
-                f = np.copy(f_p)
-                theta[i] = theta_p[i]
+    order = range(len(theta))
+    np.random.shuffle(order)
+    for i in order:
+        if cur_lnpdf is None:
+            cur_lnpdf= lnpdf(theta)
+
+        # Set up the ellipse and the slice threshold
+        nu = prior(i)
+
+        hh = np.log(np.random.uniform()) + cur_lnpdf
+
+        # Set up a bracket of angles and pick a first proposal.
+        # "phi = (theta'-theta)" is a change in angle.
+        if angle_range is None or angle_range == 0.:
+            # Bracket whole ellipse with both edges at first proposed point
+            phi= np.random.uniform()*2.*np.pi
+            phi_min= phi-2.*np.pi
+            phi_max= phi
+        else:
+            # Randomly center bracket on current point
+            phi_min= -angle_range*np.random.uniform()
+            phi_max= phi_min + angle_range
+            phi= np.random.uniform()*(phi_max-phi_min)+phi_min
+
+        # Slice sampling loop
+        theta_p = np.copy(theta)
+        while True:
+            # Compute xx for proposed angle difference and check if it's on the slice
+            xx_prop = theta[i]*np.cos(phi) + nu*np.sin(phi)
+            theta_p[i] = xx_prop
+            cur_lnpdf = lnpdf(theta_p)
+            if cur_lnpdf > hh:
+                # New point is on slice, ** EXIT LOOP **
+                theta[i] = xx_prop
                 break
-            elif theta_p[i] < theta_i:
-                theta_min = theta_p[i]
+            # Shrink slice to rejected point
+            if phi > 0:
+                phi_max = phi
+            elif phi < 0:
+                phi_min = phi
             else:
-                theta_max = theta_p[i]
-    return theta, f
+                raise RuntimeError('BUG DETECTED: Shrunk to current position and still not acceptable.')
+            # Propose new angle difference
+            phi = np.random.uniform()*(phi_max - phi_min) + phi_min
+    return theta, cur_lnpdf
 
 # TODO: consider adding helper function to construct R matrix to avoid calling
 #       gp.fit() too often. This will be useful for the hyperparameter slice

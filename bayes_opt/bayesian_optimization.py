@@ -3,8 +3,9 @@ from __future__ import division
 import numpy as np
 from sklearn.gaussian_process import GaussianProcess
 from scipy.optimize import minimize
-from scipy.linalg import cholesky, cho_solve
-from .helpers import UtilityFunction, unique_rows, PrintLog, slice_sample
+#from scipy.linalg import cholesky, cho_solve
+from scipy.stats import norm, multivariate_normal as mvn, lognorm, expon
+from .helpers import UtilityFunction, unique_rows, PrintLog, elliptical_slice
 
 __author__ = 'fmfn'
 
@@ -316,86 +317,101 @@ class BayesianOptimization(object):
             # Reset all entries, even if the same.
             self.bounds[row] = self.pbounds[key]
             
-    def _generate_hypers_samples(self):
-        """ Largely based off of https://github.com/JasperSnoek/spearmint/blob/master/spearmint/spearmint/chooser/GPEIOptChooser.py#L621
+    def _generate_hypers_sample(self):
+        """ Generate one hyperparameter sample
         """
         
         def sample_hypers(burningIn=False):
-            sample_mean_noise_amp2()
-            if self.noiseless:
-                self.noise = 1e-3
-            sample_ls()
+            # sample_mean_noise_amp2()
+            # if self.noiseless:
+            #     self.noise = 1e-3
+            # sample_ls()
+            
+            def cov_fn(theta):
+                mean, noise, amp2 = theta[:3]
+                ls = theta[3:]
+                
+                k = self.gp.corr(ls, self.gp.D)
+                K = np.eye(self.gp.X.shape[0])
+                K[self.gp.ij[:,0], self.gp.ij[:, 1]] = k
+                K[self.gp.ij[:,1], self.gp.ij[:, 0]] = k
+                
+                # Scale the covariance
+                K = amp2 * K
+                
+                # Condition the matrix for numerical reasons
+                K = K + 1e-5*np.eye(K.shape[0])
+                
+                return K
+                
+            def llh(theta):
+                mean, noise, amp2 = theta[:3]
+                ls = theta[3:]
+                y = self.gp.y.flatten()
+                
+                # Tophat Prior on Lengthscales
+                if not np.all(np.logical_and(np.greater(ls,0), np.less(ls,2))):
+                    return -np.inf
+                
+                # Sanity check
+                if mean > np.max(y) or mean < np.min(y):
+                    return -np.inf
+                
+                # Sanity check
+                if amp2 < 0 or noise < 0:
+                    return -np.inf
+                    
+                K = cov_fn(theta)
+                if not self.noiseless:
+                    K += noise*np.eye(K.shape[0])
+                lp = np.log(mvn.pdf(y-mean, np.zeros((len(y),)), K))
+                            
+                # Roll in lognormal prior on amp2, scale=1
+                lp += np.log(lognorm.pdf(amp2, 1))
+                
+                if not self.noiseless:
+                    # Roll in horseshoe prior on noise, scale = 1
+                    lp += np.log(np.log(1 + 2 * ((1 / noise) ** 2)))
+                
+                return lp
+                
+            def prior(i):
+                if i == 0:
+                    return norm.rvs(0,1)
+                elif i == 1:
+                    return expon.rvs(loc=0, scale=1)
+                elif i == 2:
+                    return lognorm.rvs(1)
+                elif i > 2:
+                    return 2*np.random.rand()
+            
+            theta = np.concatenate(([self.mean, self.noise, self.amp2], self.ls))
+            for i in range(10):
+                try:
+                    theta, l = elliptical_slice(theta, prior, llh)
+                    break
+                except:
+                    print(i)
+                    if i == 9:
+                        raise RuntimeError('Tried 10 times and still not a valid sample')
+                    pass
+            
+            self.mean, self.noise, self.amp2 = theta[:3]
+            self.ls = theta[3:]
+            
             if not burningIn:
                 self.hyper_samples.append(
                     (self.mean, self.noise, self.amp2, self.ls))
             
-        def sample_mean_noise_amp2():
-            def logprob(hypers):
-                mean = hypers[0]
-                amp2 = hypers[1]
-                noise = hypers[2]
-                
-                if mean > np.max(self.Y) or mean < np.min(self.Y):
-                    return -np.inf
-                
-                if amp2 < 0 or noise < 0:
-                    return -np.inf
-                
-                R = np.dot(self.gp.C, self.gp.C.transpose())
-                
-                cov = (amp2 * (R + 1e-6 * np.eye(R.shape[0])) +
-                       noise * np.eye(R.shape[0]))
-                chol = cholesky(cov, lower=True)
-                solve = cho_solve((chol, True),
-                                  (self.Y - mean))
-                lp = -np.sum(np.log(np.diag(chol))) \
-                     - 0.5 * np.dot((self.Y - mean), solve)
-                
-                if not self.noiseless:
-                    # Add noise horseshoe prior
-                    lp += np.log(np.log(1 + (self.noise_scale / noise)**2))
-                    
-                # Add in amplitude lognormal prior
-                lp -= 0.5 * (np.log(np.sqrt(amp2)) / self.amp2_scale)**2
-                
-                return lp
-            
-            hypers = slice_sample(np.array(
-                [self.mean, self.amp2, self.noise]), logprob, compwise=False)
-            self.mean = hypers[0]
-            self.amp2 = hypers[1]
-            self.noise = hypers[2]
-            
-        def sample_ls():
-            def logprob(ls):
-                if np.any(ls < 0) or np.any(ls > self.max_ls):
-                    return -np.inf
-                
-                # Update GP
-                self.gp.set_params(**{'theta0': ls,
-                                      'thetaU': None,
-                                      'thetaL': None})
-                ur = unique_rows(self.X)
-                self.gp.fit(self.X[ur], self.Y[ur])
-                
-                R = np.dot(self.gp.C, self.gp.C.transpose())
-                
-                cov = (self.amp2 * (R + 1e-6 * np.eye(R.shape[0])) +
-                       self.noise * np.eye(R.shape[0]))
-                chol = cholesky(cov, lower=True)
-                solve = cho_solve((chol, True),
-                                  (self.Y - self.mean))
-                lp = -np.sum(np.log(np.diag(chol))) \
-                     - 0.5 * np.dot((self.Y - self.mean), solve)
-                return lp
-            
-            self.ls = slice_sample(self.ls, logprob, compwise=True)
-            
         # Initialize hyperparameters
-        self.mean = np.mean(self.Y)
+        self.mean = np.mean(self.gp.y.flatten())
         self.noise = 1e-3
-        self.amp2 = np.std(self.Y) + 1e-4
+        self.amp2 = np.std(self.gp.y.flatten()) + 1e-4
         self.ls = np.ones((self.dim,))
+        # self.mean = norm.rvs(0,1)
+        # self.noise = expon.rvs(loc=0, scale=1)
+        # self.amp2 = lognorm.rvs(1)
+        # self.ls = [2*np.random.rand() for i in range(self.dim)]
         
         # Perform burn-in
         for i in xrange(100):
@@ -425,8 +441,12 @@ class BayesianOptimization(object):
             #       but it did not lead to good results.
             self.gp_list[i].set_params(**gp_params)
             self.gp_list[i].fit(self.X[ur], self.Y[ur])
-            # self.gp_list[i].y_mean = mean
-            # self.gp_list[i].y_std = np.sqrt(amp2)
+            self.gp_list[i].y_mean += mean
+            self.gp_list[i].y_std *= np.sqrt(amp2)
+        # print('means: %.5f'%(self.gp.y_mean))
+        # print([gp.y_mean for gp in self.gp_list])
+        # print('\nstds: %.5f'%(self.gp.y_std))
+        # print([gp.y_std for gp in self.gp_list])
 
     def maximize(self,
                  init_points=5,
@@ -508,7 +528,7 @@ class BayesianOptimization(object):
         self.gp.fit(self.X[ur], self.Y[ur])
         
         if integrateOverHypers:
-            self._generate_hypers_samples()
+            self._generate_hypers_sample()
             self._construct_gp_list()
         
         # Finding argmax of the acquisition function.
@@ -555,7 +575,7 @@ class BayesianOptimization(object):
             self.gp.fit(self.X[ur], self.Y[ur])
             
             if integrateOverHypers:
-                self._generate_hypers_samples()
+                self._generate_hypers_sample()
                 self._construct_gp_list()
 
             # Update maximum value to search for next probe point.
